@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.claude
+
+# LaTeX
+*.aux
+*.log
+*.toc
+*.out
+*.synctex.gz
+
+# Training outputs
+rewards1.npy
+rewards2.npy
+
+# Plots
+*.png
+
+# OS
+.DS_Store

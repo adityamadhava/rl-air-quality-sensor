@@ -1,0 +1,251 @@
+\documentclass[12pt, a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{parskip}
+
+\title{\textbf{CS 4122: Reinforcement Learning} \\ Programming Assignment 3 \\
+\large Optimizing Air Quality Monitoring using TD-Learning}
+\date{April 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Team Contributions}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Name} & \textbf{Roll Number} & \textbf{Contribution} \\
+\midrule
+Venkat   & XXXX & MDP formulation, report \\
+Vishwanath & XXXX & Q-Learning implementation, analysis \\
+Aditya   & XXXX & Structural Knowledge Q-Learning with analytical expectations over known transition dynamics, custom Gymnasium environment design and implementation, state transition derivations, hyperparameter tuning \\
+Divyank  & XXXX & Running training, saving plots \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\newpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{MDP Formulation}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{States and State Space}
+
+The state at time slot $t$ is a 4-tuple:
+\[
+s_t = (\theta_t,\; b_t,\; \hat{\theta}_t,\; m_t)
+\]
+
+\begin{itemize}
+    \item $\theta_t \in \mathcal{S} = \{0, 0.02, 0.04, \ldots, 0.98, 1.0\}$ — current air pollution (51 values).
+    \item $b_t \in \{0, 1, 2, \ldots, B\} = \{0, 1, \ldots, 10\}$ — battery level (11 values).
+    \item $\hat{\theta}_t \in \mathcal{S}$ — central station's estimate of air pollution after the transmission decision at time slot $t$ (51 values).
+    \item $m_t \in \mathcal{S}$ — maximum air pollution observed since the last successful transmission (51 values).
+\end{itemize}
+
+The total state space has $51 \times 11 \times 51 \times 51 = 1{,}460{,}061$ states.
+
+\subsection{Actions and Action Space}
+
+At each time slot the sensor chooses one of three actions. However, actions 1 and 2 require at least $\eta = 2$ units of battery:
+
+\[
+\mathcal{A}(s_t) = \begin{cases} \{0\} & \text{if } b_t < \eta \\ \{0, 1, 2\} & \text{if } b_t \geq \eta \end{cases}
+\]
+
+\begin{itemize}
+    \item \textbf{Action 0:} Do not transmit.
+    \item \textbf{Action 1:} Transmit the true pollution $\theta_t$.
+    \item \textbf{Action 2:} Transmit the maximum tracked value $m_t$.
+\end{itemize}
+
+\subsection{Reward}
+
+The reward at time slot $t$ is the negative of the loss $l_t$, where $l_t$ is computed using the updated estimate $\hat{\theta}_t$ (decided \emph{after} transmission):
+
+\[
+l_t = \begin{cases} |\theta_t - \hat{\theta}_t| & \text{if } \theta_t \leq \hat{\theta}_t \\ 1.5 \cdot |\theta_t - \hat{\theta}_t| & \text{if } \theta_t > \hat{\theta}_t \end{cases}
+\qquad r_t = -l_t
+\]
+
+Underestimation is penalised 1.5$\times$ more than overestimation, incentivising the sensor to keep the central station's estimate on the higher side.
+
+\subsection{State Transition Equations}
+
+Let $\delta_t \sim \alpha_\delta$ (i.i.d.\ solar energy drawn from \texttt{solar.npy}) and let $\text{ACK}_t \sim \text{Bernoulli}(\lambda)$ denote whether the transmission is acknowledged.
+
+\subsubsection*{Battery transition}
+\[
+b_{t+1} = \begin{cases}
+\min(B,\; b_t + \delta_t) & \text{action 0} \\
+\min(B,\; b_t - \eta + \delta_t) & \text{action 1 or 2}
+\end{cases}
+\]
+
+\subsubsection*{Central station estimate transition}
+\[
+\hat{\theta}_t = \begin{cases}
+\hat{\theta}_{t-1} & \text{action 0} \\
+\theta_t & \text{action 1, ACK received} \\
+\hat{\theta}_{t-1} & \text{action 1, no ACK} \\
+m_t & \text{action 2, ACK received} \\
+\hat{\theta}_{t-1} & \text{action 2, no ACK}
+\end{cases}
+\]
+
+\subsubsection*{Maximum value transition}
+\[
+m_{t+1} = \begin{cases}
+\theta_{t+1} & \text{ACK received (either action 1 or 2)} \\
+\max(m_t,\; \theta_{t+1}) & \text{otherwise}
+\end{cases}
+\]
+
+\subsubsection*{Pollution transition}
+\[
+\theta_{t+1} \sim P_{\theta_t, \cdot}
+\]
+where $P$ is the $51 \times 51$ Markov transition matrix provided in \texttt{air.npy}.
+
+\newpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{TD Learning Algorithms}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Standard Q-Learning}
+
+Standard tabular Q-learning maintains a Q-table $Q(s, a)$ updated after every step:
+\[
+Q(s_t, a_t) \leftarrow Q(s_t, a_t) + \alpha \left[ r_t + \beta \max_{a' \in \mathcal{A}(s_{t+1})} Q(s_{t+1}, a') - Q(s_t, a_t) \right]
+\]
+
+Exploration follows an $\varepsilon$-greedy policy with $\varepsilon$ decaying linearly from 1.0 to 0.01 over the first 80\% of episodes. The state-dependent action space $\mathcal{A}(s)$ is enforced at every step.
+
+\subsection{Q-Learning with Structural Knowledge}
+
+The standard update uses a single sampled transition $(r_t, s_{t+1})$, leading to high-variance estimates. Since the solar energy distribution $\alpha_\delta$ and the transmission success probability $\lambda$ are \emph{known}, we can replace the sampled TD target with its analytical expectation over these known random variables. Only $\theta_{t+1}$ is still sampled from the environment (via the unknown Markov chain).
+
+The update becomes:
+\[
+Q(s_t, a_t) \leftarrow Q(s_t, a_t) + \alpha \left[ \mathbb{E}[r_t \mid s_t, a_t] + \beta \sum_{\delta} \alpha_\delta \cdot V^\delta(s_t, a_t, \theta_{t+1}) - Q(s_t, a_t) \right]
+\]
+
+where $V^\delta$ is the expected next-state value for a given $\delta$ and sampled $\theta_{t+1}$. The cases below enumerate how each term is computed.
+
+\subsubsection*{Case 1 — Action 0 (no transmission)}
+
+$\hat{\theta}_t = \hat{\theta}_{t-1}$ deterministically. Let $d = |\theta_t - \hat{\theta}_{t-1}|$.
+
+\[
+\mathbb{E}[r_t \mid s_t, 0] = -\begin{cases} d & \theta_t \leq \hat{\theta}_{t-1} \\ 1.5d & \theta_t > \hat{\theta}_{t-1} \end{cases}
+\]
+
+\[
+V^\delta = \max_{a' \in \mathcal{A}(b')} Q\!\left(\theta_{t+1},\; b',\; \hat{\theta}_{t-1},\; \max(m_t, \theta_{t+1})\right), \quad b' = \min(B, b_t + \delta)
+\]
+
+\subsubsection*{Case 2 — Action 1 (transmit $\theta_t$), valid only if $b_t \geq \eta$}
+
+With probability $\lambda$ an ACK is received ($\hat{\theta}_t = \theta_t$, loss $= 0$); with probability $1 - \lambda$ no ACK ($\hat{\theta}_t = \hat{\theta}_{t-1}$). Let $d = |\theta_t - \hat{\theta}_{t-1}|$.
+
+\[
+\mathbb{E}[r_t \mid s_t, 1] = -(1 - \lambda) \cdot \begin{cases} d & \theta_t \leq \hat{\theta}_{t-1} \\ 1.5d & \theta_t > \hat{\theta}_{t-1} \end{cases}
+\]
+
+\[
+V^\delta = \lambda \cdot \max_{a'} Q\!\left(\theta_{t+1},\; b',\; \theta_t,\; \theta_{t+1}\right)
+        + (1-\lambda) \cdot \max_{a'} Q\!\left(\theta_{t+1},\; b',\; \hat{\theta}_{t-1},\; \max(m_t, \theta_{t+1})\right)
+\]
+\[
+b' = \min(B, b_t - \eta + \delta)
+\]
+
+\subsubsection*{Case 3 — Action 2 (transmit $m_t$), valid only if $b_t \geq \eta$}
+
+With probability $\lambda$ an ACK is received ($\hat{\theta}_t = m_t$); with probability $1 - \lambda$ no ACK. Since $m_t \geq \theta_t$ always, the ACK loss is $|{\theta_t - m_t}| = m_t - \theta_t$. Let $d_{\text{ack}} = m_t - \theta_t$ and $d_{\text{nack}} = |\theta_t - \hat{\theta}_{t-1}|$.
+
+\[
+\mathbb{E}[r_t \mid s_t, 2] = -\left[\lambda \cdot d_{\text{ack}} + (1-\lambda) \cdot \begin{cases} d_{\text{nack}} & \theta_t \leq \hat{\theta}_{t-1} \\ 1.5\,d_{\text{nack}} & \theta_t > \hat{\theta}_{t-1} \end{cases}\right]
+\]
+
+\[
+V^\delta = \lambda \cdot \max_{a'} Q\!\left(\theta_{t+1},\; b',\; m_t,\; \theta_{t+1}\right)
+        + (1-\lambda) \cdot \max_{a'} Q\!\left(\theta_{t+1},\; b',\; \hat{\theta}_{t-1},\; \max(m_t, \theta_{t+1})\right)
+\]
+\[
+b' = \min(B, b_t - \eta + \delta)
+\]
+
+By averaging over all four values of $\delta$ analytically, the structural knowledge update eliminates variance from both the solar energy and transmission outcome, producing lower-variance TD targets compared to standard Q-learning.
+
+\newpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Analysis}
+% ─────────────────────────────────────────────────────────────────────────────
+
+\subsection{Training Reward Comparison}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{reward_plot.png}
+    \caption{Smoothed average episode reward (window = 200) for both algorithms over 10{,}000 episodes.}
+    \label{fig:reward}
+\end{figure}
+
+Both algorithms converge to a similar final reward of approximately $-68$ to $-72$ per episode. Standard Q-Learning converges marginally faster in the early episodes and achieves a slightly better final average reward ($-68.1$ vs $-72.1$). This is somewhat counterintuitive — the structural knowledge algorithm uses lower-variance updates, so one might expect it to converge faster. A likely explanation is that with 10{,}000 training episodes the standard Q-learning has sufficient samples to converge, and the variance reduction from structural knowledge does not provide a large enough benefit to offset the additional computation overhead per step (the 4-iteration solar loop).
+
+\subsection{When is Action 0 (Don't Transmit) Optimal?}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{action_heatmap.png}
+    \caption{Optimal action as a function of $\theta$ and $\hat{\theta}$ (battery = 5, $m = \theta$). Blue = action 0, green = action 1, red = action 2.}
+    \label{fig:heatmap}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\textwidth]{action0_analysis.png}
+    \caption{Fraction of states (with $b \geq \eta$) where action 0 is optimal, as a function of the estimation gap $\hat{\theta} - \theta$.}
+    \label{fig:action0}
+\end{figure}
+
+From Figures~\ref{fig:heatmap} and~\ref{fig:action0}, action 0 (don't transmit) is optimal in the following pattern:
+
+\begin{itemize}
+    \item \textbf{When $\hat{\theta} > \theta$ (central station overestimates):} The policy overwhelmingly chooses action 0. Since the current estimate is already higher than the true pollution, transmitting would only reduce the estimate, increasing the asymmetric loss. It is better to save battery for a future time slot where the pollution increases.
+    \item \textbf{When $\hat{\theta} \approx \theta$ (estimate is accurate):} Action 0 is still preferred because the current estimation error is negligible. The cost of using $\eta = 2$ battery units outweighs the marginal reduction in loss.
+    \item Action 0 decreases in frequency as $\hat{\theta} - \theta$ becomes increasingly negative (severe underestimate), where transmitting becomes necessary.
+\end{itemize}
+
+\subsection{When is Action 2 (Transmit Max) Optimal?}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{action2_analysis.png}
+    \caption{Left: Fraction of states where action 2 is optimal vs estimation gap $\theta - \hat{\theta}$. Right: Fraction of states where action 2 is optimal vs $m - \theta$ gap (given underestimate).}
+    \label{fig:action2}
+\end{figure}
+
+From Figure~\ref{fig:action2}, action 2 (transmit max) is optimal in the following pattern:
+
+\begin{itemize}
+    \item \textbf{When $\hat{\theta} \gg \theta$ (central station heavily overestimates):} This is the most frequent case for action 2. When the central station's estimate is far above the true value, transmitting $m_t$ (which is $\geq \theta_t$) keeps the estimate high. Since overestimation has lower penalty (1$\times$ vs 1.5$\times$), maintaining a high estimate is strategically preferable when future transmission opportunities are uncertain.
+    \item \textbf{When $m_t \approx \theta_t$ (max buffer gap is small):} Action 2 spikes when $m - \theta = 0$, i.e., $m_t = \theta_t$. In this case transmitting $m_t$ is equivalent to transmitting the true value but with the strategic benefit that the tracked maximum already reflects the most severe recent pollution reading.
+    \item Action 2 is rarely chosen when $\theta > \hat{\theta}$ (underestimate) — in that regime action 1 (transmit true value) is preferred since it directly corrects the underestimate.
+\end{itemize}
+
+\end{document}
