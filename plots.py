@@ -2,30 +2,33 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
-r1 = np.load('rewards1.npy')
+r1 = np.load('rewards1.npy')   # test rewards, one per M=50 training episodes
 r2 = np.load('rewards2.npy')
-p1 = np.load('policy1.npy')  # shape (51, 11, 51, 51) -> theta, b, theta_hat, max_val
+p1 = np.load('policy1.npy')    # shape (51, 11, 51, 51)
+M  = 10                         # testing interval
 
 
-def smooth(x, w=200):
+def smooth(x, w=10):
+    if len(x) < w:
+        return x
     return np.convolve(x, np.ones(w) / w, mode='valid')
 
 
 # ── Plot 1: Reward curves ──────────────────────────────────────────────────────
 fig1, ax1 = plt.subplots(figsize=(9, 5))
-eps = np.arange(len(smooth(r1)))
-ax1.plot(eps, smooth(r1), label='Q-Learning', color='steelblue')
-ax1.plot(eps, smooth(r2), label='Structural Knowledge Q-Learning', color='darkorange')
-ax1.set_xlabel('Episode')
-ax1.set_ylabel('Average Sum of Reward (smoothed, w=200)')
-ax1.set_title('TD Learning — Training Reward Comparison')
+eps1 = np.arange(len(smooth(r1))) * M + M
+eps2 = np.arange(len(smooth(r2))) * M + M
+ax1.plot(eps1, smooth(r1), label='Q-Learning', color='steelblue')
+ax1.plot(eps2, smooth(r2), label='SK Q-Learning', color='darkorange')
+ax1.set_xlabel('Training Episode')
+ax1.set_ylabel('Average Test Reward (ε=0, 50 episodes)')
+ax1.set_title('TD Learning — Test Reward Comparison')
 ax1.legend()
 fig1.tight_layout()
 fig1.savefig('reward_plot.png', dpi=150)
 
 
 # ── Plot 2: Action heatmap — theta vs theta_hat (b=5, max_val=theta) ──────────
-# shows action 0 near the diagonal (theta ≈ theta_hat)
 action_grid = np.array([[p1[t, 5, th, t] for th in range(51)] for t in range(51)])
 
 cmap3 = mcolors.ListedColormap(['steelblue', 'seagreen', 'tomato'])
@@ -46,15 +49,13 @@ fig2.savefig('action_heatmap.png', dpi=150)
 
 
 # ── Plot 3: Action 0 rate vs estimation gap (θ̂ − θ) ─────────────────────────
-# for states where b >= 2 (transmission is feasible)
-# hypothesis: action 0 dominates when θ̂ ≈ θ or θ̂ > θ (already overestimating)
 diffs, a0_rate = [], []
 for diff in range(-50, 51):
     count, total = 0, 0
     for t in range(51):
-        th = t + diff          # theta_hat = theta + diff  →  gap = theta_hat - theta
+        th = t + diff
         if 0 <= th < 51:
-            subset = p1[t, 2:, th, :]   # b=2..10, all max_val
+            subset = p1[t, 2:, th, :]
             total += subset.size
             count += (subset == 0).sum()
     if total > 0:
@@ -72,12 +73,11 @@ fig3.savefig('action0_analysis.png', dpi=150)
 
 
 # ── Plot 4: Action 2 rate vs (θ − θ̂) and (max_val − θ) ─────────────────────
-# hypothesis: action 2 dominates when θ > θ̂ (underestimate) and max_val >> θ
 diffs2, a2_rate = [], []
 for diff in range(-50, 51):
     count, total = 0, 0
     for t in range(51):
-        th = t - diff          # theta - theta_hat = diff
+        th = t - diff
         if 0 <= th < 51:
             subset = p1[t, 2:, th, :]
             total += subset.size
@@ -86,14 +86,12 @@ for diff in range(-50, 51):
         diffs2.append(diff * 0.02)
         a2_rate.append(count / total)
 
-# also: action 2 rate vs (max_val - theta), for b >= 2, theta_hat < theta
 mv_gaps, a2_mv_rate = [], []
-for mv_diff in range(0, 51):  # max_val >= theta always
+for mv_diff in range(0, 51):
     count, total = 0, 0
     for t in range(51):
         mv = t + mv_diff
         if mv < 51:
-            # only states where theta_hat < theta (underestimate)
             for th in range(0, t):
                 subset = p1[t, 2:, th, mv]
                 total += subset.size
